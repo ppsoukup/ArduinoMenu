@@ -36,8 +36,7 @@ so don't forget to change it.
 #define ESP32
 
 // Enable Debug Output
- #define MENU_DEBUG
- #define MENU_DEBUG_OUT Serial
+//#define MENU_DEBUG
 
 #include <menu.h>
 #include <menuIO/esp8266Out.h>
@@ -66,7 +65,28 @@ so don't forget to change it.
   //#include <analogWrite.h>
 #endif
 
+// For AsyncWebServer
+#include <MenuIO/xmlStringOut.h>
+#include <MenuIO/StringMenuOut.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
+
+#define MENU_DEBUG_OUT Serial
+
 using namespace Menu;
+
+String escapeJson(const String &s) {
+  String r;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s.charAt(i);
+    if (c == '\"') r += "\\\"";
+    else if (c == '\\') r += "\\\\";
+    else if (c == '\n') r += "\\n";
+    else if (c == '\r') r += "\\r";
+    else r += c;
+  }
+  return r;
+}
 
 #ifdef WEB_DEBUG
   // on debug mode I put aux files on external server to allow changes without SPIFF update
@@ -130,28 +150,28 @@ const char* serverName="192.168.1.79";
 #define WS_PORT 81
 #define USE_SERIAL Serial
 #ifdef ESP8266
-ESP8266WebServer server(80);
+  ESP8266WebServer server(HTTP_PORT);
 #elif defined(ESP32)
-WebServer server(80);
+  AsyncWebServer server(HTTP_PORT);
 #endif
-WebSocketsServer webSocket(81);
+WebSocketsServer webSocket(WS_PORT);
 
 #define MAX_DEPTH 2
 idx_t web_tops[MAX_DEPTH];
 PANELS(webPanels,{0,0,80,100});
-xmlFmt<esp8266_WebServerStreamOut> serverOut(server,web_tops,webPanels);
-jsonFmt<esp8266_WebServerStreamOut> jsonOut(server,web_tops,webPanels);
+xmlFmt<xmlStringOut> xmlOut(web_tops,webPanels, (menuOut::styles)wrapStyle);
+jsonFmt<esp8266BufferedOut> jsonOut(web_tops,webPanels);
 jsonFmt<esp8266BufferedOut> wsOut(web_tops,webPanels);
 
 //menu action functions
 result action1(eventMask event, navNode& nav, prompt &item) {
   Serial.println("action A called!");
-  serverOut<<"This is action <b>A</b> web report "<<(millis()%1000)<<"<br/>";
+  xmlOut<<"This is action <b>A</b> web report "<<(millis()%1000)<<"<br/>";
   return proceed;
 }
 result action2(eventMask event, navNode& nav, prompt &item) {
   Serial.println("action B called!");
-  serverOut<<"This is action <b>B</b> web report "<<(millis()%1000)<<"<br/>";
+  xmlOut<<"This is action <b>B</b> web report "<<(millis()%1000)<<"<br/>";
   return proceed;
 }
 
@@ -248,13 +268,13 @@ template<typename T>//some utill to help us calculate array sizes (known at comp
 constexpr inline size_t menuData_len(T& o) {return sizeof(o)/sizeof(decltype(o[0]));}
 
 //serial menu navigation
-MENU_OUTLIST(out,&serverOut);
+MENU_OUTLIST(out,&xmlOut);
 serialIn serial(Serial);
 NAVROOT(nav,mainMenu,MAX_DEPTH,serial,out);
 
 //xml+http navigation control
 noInput none;//web uses its own API
-menuOut* web_outputs[]={&serverOut};
+menuOut* web_outputs[]={&xmlOut};
 outputsList web_out(web_outputs,menuData_len(web_outputs));
 navNode web_cursors[MAX_DEPTH];
 navRoot webNav(mainMenu, web_cursors, MAX_DEPTH, none, web_out);
@@ -296,9 +316,8 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         wsOut<<"\",\n\"menu\":";
         wsNav.doOutput();
         wsOut<<"\n}";
-        webSocket.sendTXT(num,wsOut.response);
-        // wsOut.response.remove(0);
-        // jsonEnd();
+        String escapedOutput = escapeJson(wsOut.response);
+        webSocket.sendTXT(num, escapedOutput);
       } break;
     case WStype_BIN: {
         USE_SERIAL<<"[WSc] get binary length:"<<length<<"[";
@@ -313,64 +332,53 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         const char* inp=(const char*)(payload+len);
         //Serial<<"id:"<<id<<endl;
         if (id==nav.active().hash()) {
-          //Serial<<"id ok."<<endl;Serial.flush();
-          //Serial<<"input:"<<inp<<endl;
-          //StringStream inStr(inp);
-          //while(inStr.available())
           nav.doInput(inp);
           webSocket.sendTXT(num, "binBusy=false;");//send javascript to unlock the state
-        } //else Serial<<"id not ok!"<<endl;
-        //Serial<<endl;
+        }
       }
       break;
     default:break;
   }
 }
 
-void pageStart() {
+String pageStart(AsyncWebServerRequest *request) {
   _trace(Serial<<"pasgeStart!"<<endl);
-  serverOut<<"HTTP/1.1 200 OK\r\n"
-    <<"Content-Type: text/xml\r\n"
-    <<"Connection: close\r\n"
-    <<"Expires: 0\r\n"
-    <<"\r\n";
-  serverOut<<"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\r\n"
-    "<?xml-stylesheet type=\"text/xsl\" href=\"";
-  serverOut<<xslt;
-  serverOut<<CUR_VERSION"/device.xslt";
-  serverOut<<"\"?>\r\n<menuLib"
-    #ifdef WEB_DEBUG
-      <<" debug=\"yes\""
-    #endif
-    <<" host=\"";
-    serverOut.print(APName);
-    serverOut<<"\">\r\n<sourceURL ver=\"" CUR_VERSION "/\">";
-  if (server.hasHeader("host"))
-    serverOut.print(server.header("host"));
+  String response;
+  response += "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\r\n";
+  response += "<?xml-stylesheet type=\"text/xsl\" href=\"";
+  response += xslt;
+  response += CUR_VERSION "/device.xslt";
+  response += "\"?>\r\n<menuLib";
+  #ifdef WEB_DEBUG
+    response += " debug=\"yes\"";
+  #endif
+  response += " host=\"";
+  response += APName;
+  response += "\">\r\n<sourceURL ver=\"" CUR_VERSION "/\">";
+  if (request->hasHeader("host"))
+    response += request->header("host");
   else
-    serverOut.print(APName);
-  serverOut<<"</sourceURL>";
+    response += APName;
+  response += "</sourceURL>";
+  return response;
 }
 
-void pageEnd() {
-  serverOut<<"</menuLib>";
-  server.client().stop();
+String pageEnd() {
+  String response = "</menuLib>";
+  return response;
 }
 
-void jsonStart() {
+String jsonStart() {
   _trace(Serial<<"jsonStart!"<<endl);
-  serverOut<<"HTTP/1.1 200 OK\r\n"
-    <<"Content-Type: application/json; charset=utf-8\r\n"
-    <<"Connection: close\r\n"
-    <<"Expires: 0\r\n"
-    <<"\r\n";
+  String response = "HTTP/1.1 200 OK\r\n";
+  response += "Content-Type: application/json; charset=utf-8\r\n";
+  response += "Connection: close\r\n";
+  response += "Expires: 0\r\n";
+  response += "\r\n";
+  return response;
 }
 
-void jsonEnd() {
-  server.client().stop();
-}
-
-bool handleMenu(navRoot& nav){
+bool handleMenu(navRoot& nav, AsyncWebServerRequest *request){
   _trace(
     #ifdef ESP8266
       uint32_t free = system_get_free_heap_size();
@@ -380,23 +388,26 @@ bool handleMenu(navRoot& nav){
     Serial.print(F("free memory:"));
     Serial.print(free);
     Serial.print(F(" handleMenu "));
-    Serial.println(server.arg("at").c_str());
+    if (request->hasParam("at")) {
+      Serial.println(request->getParam("at")->value().c_str());
+    }
   );
-  String at=server.arg("at");
-  bool r;
-  r=nav.async(server.hasArg("at")?at.c_str():"/");
-  return r;
+  String atvalue = "/";
+  if (request->hasParam("at")) {
+    atvalue = request->getParam("at")->value();
+  }
+  return nav.async(atvalue.c_str());
 }
 
 //redirect to version folder,
 //this allows agressive caching with no need to cache reset on version change
-auto mainPage= []() {
+void mainPage(AsyncWebServerRequest* request) {
   _trace(Serial<<"serving main page from root!"<<endl);
-  server.sendHeader("Location", CUR_VERSION "/index.html", true);
-  server.send ( 302, "text/plain", "");
-  if (server.hasArg("at"))
-    nav.async(server.arg("at").c_str());
-};
+  request->redirect(String(CUR_VERSION) + "/index.html");
+  if (request->hasParam("at")) {
+    nav.async(request->getParam("at")->value().c_str());
+  }
+}
 
 void setup(){
   //check your pins before activating this
@@ -433,7 +444,7 @@ void setup(){
   // delay(10);
   // wifi_station_set_hostname((char*)serverName);
   Serial.println("");
-  Serial.println("Arduino menu webserver example");
+  Serial.println("Arduino menu Async webserver example");
 
   SPIFFS.begin();
 
@@ -460,30 +471,40 @@ void setup(){
   server.on("/",HTTP_GET,mainPage);
 
   //menu xml server over http
-  server.on("/menu", HTTP_GET, []() {
-    pageStart();
-    serverOut<<"<output state=\""<<((int)&webNav.idleTask)<<"\"><![CDATA[";
+  server.on("/menu", HTTP_GET, [](AsyncWebServerRequest *request) {
+    xmlOut.clear();  // Clear this for a fresh page
+    // Create a streaming response object
+    AsyncResponseStream *response = request->beginResponseStream("text/xml");
+    response->addHeader("Expires", "0"); // Set HTTP headers Don't cache
+    response->print(pageStart(request));
+    response->print("<output state=\"" + String((int)&webNav.idleTask) + "\"><![CDATA[");
     _trace(Serial<<"output count"<<webNav.out.cnt<<endl);
-    handleMenu(webNav);//do navigation (read input) and produce output messages or reports
-    serverOut<<"]]></output>";
+    handleMenu(webNav, request);//do navigation (read input) and produce output messages or reports
+    response->print(xmlOut.getString());  // Add the generated XML from the menu handler
+    xmlOut.clear();  // Clear the xml buffer since we just captured it to send
+    response->print("]]></output>");
     webNav.doOutput();
-    pageEnd();
+    response->print(xmlOut.getString());  // Add the wrapped, generated XML from the menu doOutput
+    xmlOut.clear();  // Clear the xml buffer since we just captured it to send
+    response->print(pageEnd());
+    request->send(response);
   });
 
   //menu json server over http
-  server.on("/json", HTTP_GET, []() {
+  server.on("/json", HTTP_GET, [](AsyncWebServerRequest *request) {
     _trace(Serial<<"json request!"<<endl);
-    jsonStart();
-    serverOut<<"{\"output\":\"";
-    handleMenu(jsonNav);
-    serverOut<<"\",\n\"menu\":";
+    String response;
+    response = jsonStart();
+    response += "{\"output\":\"";
+    handleMenu(jsonNav, request);
+    response +=  "\",\n\"menu\":";
     jsonNav.doOutput();
-    serverOut<<"\n}";
-    jsonEnd();
+    response +=  "\n}";
+    request->send(200, "application/json", response);
   });
 
   server.begin();
-  Serial.println("HTTP server started");
+  Serial.println("HTTP Async server started");
   Serial.println("Serving ArduinoMenu example.");
   #ifdef MENU_DEBUG
     server.serveStatic("/", SPIFFS, "/","max-age=30");
@@ -493,8 +514,6 @@ void setup(){
 }
 
 void loop(void){
-  wsOut.response.remove(0);//clear websocket json buffer
   webSocket.loop();
-  server.handleClient();
   delay(1);
 }
