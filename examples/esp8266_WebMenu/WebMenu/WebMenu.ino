@@ -30,6 +30,15 @@ so don't forget to change it.
 
 */
 
+// Define as required
+// Processor
+//#define ESP8266
+#define ESP32
+
+// Enable Debug Output
+ #define MENU_DEBUG
+ #define MENU_DEBUG_OUT Serial
+
 #include <menu.h>
 #include <menuIO/esp8266Out.h>
 #include <menuIO/xmlFmt.h>//to write a menu has html page
@@ -37,24 +46,24 @@ so don't forget to change it.
 #include <menuIO/xmlFmt.h>//to write a menu has xml page
 #include <menuIO/jsonFmt.h>//to write a menu has xml page
 #ifndef ARDUINO_STREAMING
-  #include <streamFlow.h>//https://github.com/neu-rah/streamFlow
+  #include <streamFlow.h>//https://github.com/neu-rah/streamFlow version 1.1.1 (2.0+ fails)
 #else
   #include <Streaming.h>//https://github.com/scottdky/Streaming
 #endif
-//#include <menuIO/jsFmt.h>//to send javascript thru web socket (live update)
+#include <menuIO/jsFmt.h>//to send javascript thru web socket (live update)
 #include <FS.h>
 #ifdef ESP8266
-#include <Hash.h>
-extern "C" {
-  #include "user_interface.h"
-}
+  #include <Hash.h>
+  extern "C" {
+    #include "user_interface.h"
+  }
 #elif defined(ESP32)
-#include <SPIFFS.h>
+  #include <SPIFFS.h>
 
-// Use external analogWrite library for ESP32 (optional)
-// for compatibility with older versions of espressif/arduino-esp32
-// https://github.com/Dlloydev/ESP32-ESP32S2-AnalogWrite
-#include <analogWrite.h>
+  // Use external analogWrite library for ESP32 (optional)
+  // for compatibility with older versions of espressif/arduino-esp32
+  // https://github.com/Dlloydev/ESP32-ESP32S2-AnalogWrite
+  //#include <analogWrite.h>
 #endif
 
 using namespace Menu;
@@ -76,18 +85,24 @@ menuOut& operator<<(menuOut& o,endlObj) {
   return o;
 }
 
-//this version numbers MUST be the same as data/1.2
+//this version numbers MUST be the same as data/x.y
 #define CUR_VERSION "1.5"
 #define APName "WebMenu"
 
 int ledCtrl=LOW;
-//on my esp12e led pin is 2
-#define LEDPIN 2
-//this is ok on other boards
-// #define LEDPIN LED_BUILTIN
+//on my esp12e led pin is 2, on my esp32 adafruit feather V2 the led pin is 13
+#ifdef ESP8266
+  #define LEDPIN 2
+#elif defined(ESP32)
+  #define LEDPIN 13
+#else
+  //this is ok on other boards
+  #define LEDPIN LED_BUILTIN
+#endif
+
 void updLed() {
   _trace(Serial<<"update led state!"<<endl);
-  digitalWrite(LEDPIN,!ledCtrl);
+  digitalWrite(LEDPIN,ledCtrl);
 }
 
 #define ANALOG_PIN 4
@@ -168,11 +183,11 @@ int duty=50;//%
 int timeOn=50;//ms
 void updAnalog() {
   // analogWrite(ANALOG_PIN,map(timeOn,0,100,0,255/*PWMRANGE*/));
-  analogWrite(ANALOG_PIN,map(duty,0,100,0,255/*PWMRANGE*/));
+  // analogWrite(ANALOG_PIN,map(duty,0,100,0,255/*PWMRANGE*/));
 }
 
-char* constMEM alphaNum MEMMODE=" 0123456789.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz,\\|!\"#$%&/()=?~*^+-{}[]€";
-char* constMEM alphaNumMask[] MEMMODE={alphaNum};
+const char* constMEM alphaNum MEMMODE=" 0123456789.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz,\\|!\"#$%&/()=?~*^+-{}[]€";
+const char* constMEM alphaNumMask[] MEMMODE={alphaNum};
 char name[]="                                                  ";
 
 uint16_t year=2017;
@@ -265,7 +280,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       break;
     case WStype_CONNECTED: {
         IPAddress ip = webSocket.remoteIP(num);
-        //USE_SERIAL.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+        USE_SERIAL.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
         webSocket.sendTXT(num, "console.log('ArduinoMenu Connected')");
       }
       break;
@@ -287,7 +302,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       } break;
     case WStype_BIN: {
         USE_SERIAL<<"[WSc] get binary length:"<<length<<"[";
-        for(int c=0;c<length;c++) {
+        for(size_t c=0;c<length;c++) {
           USE_SERIAL.print(*(char*)(payload+c),HEX);
           USE_SERIAL.write(',');
         }
@@ -357,7 +372,11 @@ void jsonEnd() {
 
 bool handleMenu(navRoot& nav){
   _trace(
-    uint32_t free = system_get_free_heap_size();
+    #ifdef ESP8266
+      uint32_t free = system_get_free_heap_size();
+    #elif defined(ESP32)
+      uint32_t free = ESP.getFreeHeap();
+    #endif
     Serial.print(F("free memory:"));
     Serial.print(free);
     Serial.print(F(" handleMenu "));
